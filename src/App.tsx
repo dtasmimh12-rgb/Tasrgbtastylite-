@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { io, Socket } from 'socket.io-client';
 import { 
   Search, 
   ShoppingBag, 
@@ -32,7 +33,7 @@ import {
   Wallet,
   Banknote
 } from 'lucide-react';
-import { RESTAURANTS, CATEGORIES, Restaurant, MenuItem, CartItem, Message, User as UserType, UserRole } from './types';
+import { RESTAURANTS, CATEGORIES, Restaurant, MenuItem, CartItem, Message, User as UserType, UserRole, PastOrder } from './types';
 
 export default function App() {
   const [selectedCategory, setSelectedCategory] = useState('All');
@@ -48,14 +49,47 @@ export default function App() {
   
   // Chat State
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editPhone, setEditPhone] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const socketRef = useRef<Socket | null>(null);
 
   // Auth State
   const [currentUser, setCurrentUser] = useState<UserType | null>(() => {
     const savedUser = localStorage.getItem('quickbite_user');
     return savedUser ? JSON.parse(savedUser) : null;
   });
+
+  // Socket Connection
+  useEffect(() => {
+    // Connect to the same host as the app
+    const socket = io();
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('Connected to chat server');
+      // Join a default room for the active delivery demo
+      socket.emit('join-room', 'order-123');
+    });
+
+    socket.on('receive-message', (message: Message) => {
+      // Convert string timestamp back to Date object
+      const msgWithDate = {
+        ...message,
+        timestamp: new Date(message.timestamp)
+      };
+      setMessages(prev => [...prev, msgWithDate]);
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
   const [loginStep, setLoginStep] = useState<'role' | 'input' | 'otp'>('role');
   const [selectedRole, setSelectedRole] = useState<UserRole>('customer');
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
@@ -64,6 +98,28 @@ export default function App() {
   const [isEmail, setIsEmail] = useState(true);
   const [paymentMethod, setPaymentMethod] = useState<'cod' | 'card' | 'paypal' | 'bkash' | 'nagad'>('cod');
   const [useLoyaltyPoints, setUseLoyaltyPoints] = useState(false);
+
+  // Courier State
+  const [isOnline, setIsOnline] = useState(true);
+
+  // Order History State
+  const [pastOrders, setPastOrders] = useState<PastOrder[]>(() => {
+    const savedOrders = localStorage.getItem('quickbite_past_orders');
+    if (savedOrders) {
+      try {
+        const parsed = JSON.parse(savedOrders);
+        return parsed.map((o: any) => ({ ...o, date: new Date(o.date) }));
+      } catch (e) {
+        console.error('Failed to parse past orders', e);
+        return [];
+      }
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('quickbite_past_orders', JSON.stringify(pastOrders));
+  }, [pastOrders]);
 
   // Review State
   const [showReviewModal, setShowReviewModal] = useState(false);
@@ -144,26 +200,26 @@ export default function App() {
   }, [orderStatus]);
 
   const sendMessage = () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || !socketRef.current) return;
+    
+    const senderRole = currentUser?.role === 'courier' ? 'courier' : 'user';
+    
     const newMessage: Message = {
       id: Date.now().toString(),
-      sender: 'user',
+      sender: senderRole,
       text: chatInput,
       timestamp: new Date()
     };
+
+    // Update local state
     setMessages(prev => [...prev, newMessage]);
     setChatInput('');
 
-    // Simulate response
-    setTimeout(() => {
-      const response: Message = {
-        id: (Date.now() + 1).toString(),
-        sender: trackingPhase === 'preparing' ? 'restaurant' : 'courier',
-        text: trackingPhase === 'preparing' ? "We're working hard on your meal! It'll be ready for pickup soon." : "I'm on my way! Traffic is light, so I should be there shortly.",
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, response]);
-    }, 1500);
+    // Emit to socket
+    socketRef.current.emit('send-message', {
+      room: 'order-123',
+      message: newMessage
+    });
   };
 
   const addToCart = (item: MenuItem, restaurant: Restaurant) => {
@@ -213,6 +269,14 @@ export default function App() {
       }
 
       setOrderStatus('confirmed');
+      const newOrder: PastOrder = {
+        id: Math.random().toString(36).substr(2, 9),
+        restaurantName: selectedRestaurant?.name || 'Unknown Restaurant',
+        items: [...cart],
+        date: new Date(),
+        total: finalTotal
+      };
+      setPastOrders(prev => [newOrder, ...prev]);
       setLastOrderItems([...cart]);
       setLastRestaurant(selectedRestaurant);
       setCart([]);
@@ -285,6 +349,28 @@ export default function App() {
     setCart([]);
     setOrderStatus('idle');
     setUseLoyaltyPoints(false);
+    setIsDashboardOpen(false);
+    setIsEditingProfile(false);
+  };
+
+  const handleStartEdit = () => {
+    setEditName(currentUser?.name || '');
+    setEditEmail(currentUser?.email || '');
+    setEditPhone(currentUser?.phone || '');
+    setIsEditingProfile(true);
+  };
+
+  const handleSaveProfile = () => {
+    if (!currentUser) return;
+    const updatedUser = {
+      ...currentUser,
+      name: editName,
+      email: editEmail,
+      phone: editPhone
+    };
+    setCurrentUser(updatedUser);
+    localStorage.setItem('quickbite_user', JSON.stringify(updatedUser));
+    setIsEditingProfile(false);
   };
 
   if (!currentUser) {
@@ -494,13 +580,18 @@ export default function App() {
 
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2 border-l border-gray-100 pl-4">
-                <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center text-orange-500">
-                  <Store size={18} />
-                </div>
-                <div className="hidden sm:block text-left">
-                  <p className="text-xs font-bold leading-none">{currentUser.name}</p>
-                  <p className="text-[10px] text-gray-400 capitalize">Restaurant Manager</p>
-                </div>
+                <button 
+                  onClick={() => setIsDashboardOpen(true)}
+                  className="flex items-center gap-2 hover:bg-gray-50 p-1 rounded-xl transition-colors"
+                >
+                  <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center text-orange-500">
+                    <Store size={18} />
+                  </div>
+                  <div className="hidden sm:block text-left">
+                    <p className="text-xs font-bold leading-none">{currentUser.name}</p>
+                    <p className="text-[10px] text-gray-400 capitalize">Restaurant Manager</p>
+                  </div>
+                </button>
                 <button 
                   onClick={handleLogout}
                   className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
@@ -652,19 +743,29 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-6">
-              <div className="flex items-center gap-2 bg-green-50 px-3 py-1.5 rounded-full">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span className="text-xs font-bold text-green-700">Online</span>
-              </div>
+              <button 
+                onClick={() => setIsOnline(!isOnline)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-full transition-all ${
+                  isOnline ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'
+                }`}
+              >
+                <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+                <span className="text-xs font-bold">{isOnline ? 'Online' : 'Offline'}</span>
+              </button>
               
               <div className="flex items-center gap-2 border-l border-gray-100 pl-4">
-                <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-500">
-                  <User size={18} />
-                </div>
-                <div className="hidden sm:block text-left">
-                  <p className="text-xs font-bold leading-none">{currentUser.name}</p>
-                  <p className="text-[10px] text-gray-400 capitalize">Delivery Expert</p>
-                </div>
+                <button 
+                  onClick={() => setIsDashboardOpen(true)}
+                  className="flex items-center gap-2 hover:bg-gray-50 p-1 rounded-xl transition-colors"
+                >
+                  <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-500">
+                    <User size={18} />
+                  </div>
+                  <div className="hidden sm:block text-left">
+                    <p className="text-xs font-bold leading-none">{currentUser.name}</p>
+                    <p className="text-[10px] text-gray-400 capitalize">Delivery Expert</p>
+                  </div>
+                </button>
                 <button 
                   onClick={handleLogout}
                   className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
@@ -696,7 +797,22 @@ export default function App() {
             ))}
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 relative">
+            {!isOnline && (
+              <div className="absolute inset-0 z-10 bg-white/60 backdrop-blur-[2px] rounded-[2rem] flex flex-col items-center justify-center text-center p-8">
+                <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-6 text-gray-400">
+                  <Truck size={40} />
+                </div>
+                <h3 className="text-2xl font-bold mb-2">You're currently offline</h3>
+                <p className="text-gray-500 max-w-xs">Go online to start receiving new delivery tasks and track your earnings.</p>
+                <button 
+                  onClick={() => setIsOnline(true)}
+                  className="mt-8 bg-green-500 text-white px-8 py-3 rounded-2xl font-bold hover:bg-green-600 transition-all shadow-lg shadow-green-200"
+                >
+                  Go Online Now
+                </button>
+              </div>
+            )}
             {/* Active Delivery */}
             <div className="lg:col-span-2 space-y-6">
               <h3 className="text-xl font-bold flex items-center gap-2">
@@ -741,7 +857,10 @@ export default function App() {
                     <button className="flex-1 bg-orange-500 text-white py-4 rounded-2xl font-bold hover:bg-orange-600 transition-colors shadow-lg shadow-orange-200">
                       Arrived at Restaurant
                     </button>
-                    <button className="w-14 h-14 bg-gray-100 text-gray-600 rounded-2xl flex items-center justify-center hover:bg-gray-200 transition-colors">
+                    <button 
+                      onClick={() => setIsChatOpen(true)}
+                      className="w-14 h-14 bg-gray-100 text-gray-600 rounded-2xl flex items-center justify-center hover:bg-gray-200 transition-colors"
+                    >
                       <MessageCircle size={24} />
                     </button>
                   </div>
@@ -828,16 +947,21 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-2 border-l border-gray-100 pl-4">
-              <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-gray-500">
-                <User size={18} />
-              </div>
-              <div className="hidden sm:block text-left">
-                <p className="text-xs font-bold leading-none">{currentUser.name}</p>
-                <div className="flex items-center gap-1 mt-0.5">
-                  <Star size={10} className="text-yellow-500 fill-yellow-500" />
-                  <span className="text-[10px] text-gray-400 font-bold">{currentUser.loyaltyPoints || 0} Points</span>
+              <button 
+                onClick={() => setIsDashboardOpen(true)}
+                className="flex items-center gap-2 hover:bg-gray-50 p-1 rounded-xl transition-colors"
+              >
+                <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-gray-500">
+                  <User size={18} />
                 </div>
-              </div>
+                <div className="hidden sm:block text-left">
+                  <p className="text-xs font-bold leading-none">{currentUser.name}</p>
+                  <div className="flex items-center gap-1 mt-0.5">
+                    <Star size={10} className="text-yellow-500 fill-yellow-500" />
+                    <span className="text-[10px] text-gray-400 font-bold">{currentUser.loyaltyPoints || 0} Points</span>
+                  </div>
+                </div>
+              </button>
               <button 
                 onClick={handleLogout}
                 className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
@@ -1662,6 +1786,318 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* User Dashboard */}
+      <AnimatePresence>
+        {isDashboardOpen && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsDashboardOpen(false)}
+              className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[70]"
+            />
+            <motion.div 
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed right-0 top-0 bottom-0 w-full max-w-2xl bg-[#F8F9FA] z-[70] shadow-2xl flex flex-col"
+            >
+              <div className="p-6 bg-white border-b border-gray-100 flex items-center justify-between sticky top-0 z-10">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-orange-500 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-orange-200">
+                    <User size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold">User Dashboard</h3>
+                    <p className="text-xs text-gray-400 font-medium uppercase tracking-wider">Manage your profile & activity</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsDashboardOpen(false)} 
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                >
+                  <X />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-8 space-y-8">
+                {/* Profile Section */}
+                <section className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
+                  <div className="flex flex-col md:flex-row items-center gap-8">
+                    <div className="relative">
+                      <div className="w-32 h-32 bg-gray-100 rounded-[2.5rem] overflow-hidden border-4 border-white shadow-xl">
+                        <img 
+                          src={`https://picsum.photos/seed/${currentUser.id}/200/200`} 
+                          alt="Profile" 
+                          className="w-full h-full object-cover" 
+                        />
+                      </div>
+                      <button className="absolute -bottom-2 -right-2 bg-orange-500 text-white p-2.5 rounded-2xl shadow-lg hover:bg-orange-600 transition-all border-4 border-white">
+                        <Smartphone size={16} />
+                      </button>
+                    </div>
+                    <div className="flex-1 text-center md:text-left">
+                      {isEditingProfile ? (
+                        <div className="space-y-4">
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider ml-1">Full Name</label>
+                            <input 
+                              type="text"
+                              className="w-full bg-gray-50 border border-gray-100 rounded-xl py-2 px-4 focus:ring-2 focus:ring-orange-500 outline-none transition-all font-medium"
+                              value={editName}
+                              onChange={(e) => setEditName(e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider ml-1">Email Address</label>
+                            <input 
+                              type="email"
+                              className="w-full bg-gray-50 border border-gray-100 rounded-xl py-2 px-4 focus:ring-2 focus:ring-orange-500 outline-none transition-all font-medium"
+                              value={editEmail}
+                              onChange={(e) => setEditEmail(e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider ml-1">Phone Number</label>
+                            <input 
+                              type="tel"
+                              className="w-full bg-gray-50 border border-gray-100 rounded-xl py-2 px-4 focus:ring-2 focus:ring-orange-500 outline-none transition-all font-medium"
+                              value={editPhone}
+                              onChange={(e) => setEditPhone(e.target.value)}
+                            />
+                          </div>
+                          <div className="flex gap-3 pt-2">
+                            <button 
+                              onClick={handleSaveProfile}
+                              className="bg-orange-500 text-white px-6 py-2 rounded-xl font-bold text-sm hover:bg-orange-600 transition-all shadow-lg shadow-orange-200"
+                            >
+                              Save Changes
+                            </button>
+                            <button 
+                              onClick={() => setIsEditingProfile(false)}
+                              className="bg-gray-100 text-gray-600 px-6 py-2 rounded-xl font-bold text-sm hover:bg-gray-200 transition-all"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap items-center justify-center md:justify-start gap-3 mb-2">
+                            <h4 className="text-2xl font-bold">{currentUser.name}</h4>
+                            <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                              currentUser.role === 'customer' ? 'bg-blue-100 text-blue-600' :
+                              currentUser.role === 'restaurant' ? 'bg-orange-100 text-orange-600' :
+                              'bg-green-100 text-green-600'
+                            }`}>
+                              {currentUser.role}
+                            </span>
+                          </div>
+                          <p className="text-gray-500 mb-6 flex items-center justify-center md:justify-start gap-2">
+                            <Mail size={16} /> {currentUser.email || 'No email provided'}
+                          </p>
+                          <div className="flex flex-wrap justify-center md:justify-start gap-4">
+                            <button 
+                              onClick={handleStartEdit}
+                              className="bg-orange-500 text-white px-6 py-2.5 rounded-xl font-bold text-sm hover:bg-orange-600 transition-all shadow-lg shadow-orange-200"
+                            >
+                              Edit Profile
+                            </button>
+                            <button 
+                              onClick={handleLogout}
+                              className="bg-gray-100 text-gray-600 px-6 py-2.5 rounded-xl font-bold text-sm hover:bg-gray-200 transition-all"
+                            >
+                              Logout
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                {/* Stats Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {currentUser.role === 'customer' && (
+                    <>
+                      <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                        <div className="flex items-center gap-4 mb-2">
+                          <div className="w-10 h-10 bg-yellow-50 text-yellow-600 rounded-xl flex items-center justify-center">
+                            <Star size={20} className="fill-yellow-600" />
+                          </div>
+                          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Loyalty Points</p>
+                        </div>
+                        <h3 className="text-2xl font-bold">{currentUser.loyaltyPoints || 0}</h3>
+                        <p className="text-[10px] text-gray-400 mt-1">Worth approx. ${( (currentUser.loyaltyPoints || 0) * 0.1).toFixed(2)}</p>
+                      </div>
+                      <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                        <div className="flex items-center gap-4 mb-2">
+                          <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center">
+                            <ShoppingBag size={20} />
+                          </div>
+                          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Total Orders</p>
+                        </div>
+                        <h3 className="text-2xl font-bold">24</h3>
+                        <p className="text-[10px] text-gray-400 mt-1">Since Jan 2024</p>
+                      </div>
+                    </>
+                  )}
+                  {currentUser.role === 'courier' && (
+                    <>
+                      <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                        <div className="flex items-center gap-4 mb-2">
+                          <div className="w-10 h-10 bg-green-50 text-green-600 rounded-xl flex items-center justify-center">
+                            <DollarSign size={20} />
+                          </div>
+                          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Total Earnings</p>
+                        </div>
+                        <h3 className="text-2xl font-bold">$1,450.00</h3>
+                        <p className="text-[10px] text-gray-400 mt-1">This month</p>
+                      </div>
+                      <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                        <div className="flex items-center gap-4 mb-2">
+                          <div className="w-10 h-10 bg-orange-50 text-orange-600 rounded-xl flex items-center justify-center">
+                            <CheckCircle size={20} />
+                          </div>
+                          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Completed Tasks</p>
+                        </div>
+                        <h3 className="text-2xl font-bold">156</h3>
+                        <p className="text-[10px] text-gray-400 mt-1">98% success rate</p>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Activity Section / Order History */}
+                <section className="space-y-4">
+                  <div className="flex items-center justify-between px-2">
+                    <h4 className="text-lg font-bold">
+                      {currentUser.role === 'customer' ? 'Order History' : 'Recent Activity'}
+                    </h4>
+                    {currentUser.role === 'customer' && pastOrders.length > 0 && (
+                      <span className="text-[10px] font-bold text-orange-500 bg-orange-50 px-2 py-1 rounded-full uppercase tracking-wider">
+                        {pastOrders.length} Orders
+                      </span>
+                    )}
+                  </div>
+                  
+                  <div className="space-y-3">
+                    {currentUser.role === 'customer' ? (
+                      pastOrders.length > 0 ? (
+                        pastOrders.map(order => (
+                          <div key={order.id} className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm group hover:border-orange-200 transition-all">
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 bg-gray-50 rounded-xl flex items-center justify-center text-gray-400 group-hover:text-orange-500 transition-colors">
+                                  <ShoppingBag size={20} />
+                                </div>
+                                <div>
+                                  <p className="font-bold text-sm">{order.restaurantName}</p>
+                                  <p className="text-xs text-gray-400">
+                                    {order.date.toLocaleDateString('en-US', { 
+                                      month: 'short', 
+                                      day: 'numeric', 
+                                      year: 'numeric' 
+                                    })} • {order.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-bold text-sm text-orange-600">${order.total.toFixed(2)}</p>
+                                <p className="text-[10px] text-green-500 font-bold uppercase tracking-wider">Delivered</p>
+                              </div>
+                            </div>
+                            
+                            <div className="pl-16 space-y-1">
+                              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Items Ordered</p>
+                              <div className="flex flex-wrap gap-2">
+                                {order.items.map((item, idx) => (
+                                  <span key={idx} className="text-[11px] bg-gray-50 text-gray-600 px-2 py-1 rounded-lg border border-gray-100">
+                                    {item.quantity}x {item.name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="bg-white p-12 rounded-3xl border border-dashed border-gray-200 flex flex-col items-center justify-center text-center">
+                          <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center text-gray-300 mb-4">
+                            <ShoppingBag size={32} />
+                          </div>
+                          <p className="font-bold text-gray-400">No orders yet</p>
+                          <p className="text-xs text-gray-300 mt-1">Your past orders will appear here</p>
+                        </div>
+                      )
+                    ) : (
+                      [1, 2, 3].map(i => (
+                        <div key={i} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center justify-between group hover:border-orange-200 transition-all cursor-pointer">
+                          <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-gray-400 group-hover:text-orange-500 transition-colors">
+                              {currentUser.role === 'customer' ? <ShoppingBag size={18} /> : <Truck size={18} />}
+                            </div>
+                            <div>
+                              <p className="font-bold text-sm">
+                                {currentUser.role === 'customer' ? 'Order from Burger Haven' : 'Delivery to Park Avenue'}
+                              </p>
+                              <p className="text-xs text-gray-400">March {28 - i}, 2026 • 12:30 PM</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-bold text-sm">{currentUser.role === 'customer' ? '$24.50' : '+$8.50'}</p>
+                            <p className="text-[10px] text-green-500 font-bold uppercase tracking-wider">Completed</p>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  {currentUser.role === 'customer' && pastOrders.length > 3 && (
+                    <button className="w-full py-3 text-gray-400 font-bold text-sm hover:text-orange-500 transition-colors">
+                      View All History
+                    </button>
+                  )}
+                </section>
+
+                {/* Security & Settings */}
+                <section className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm space-y-6">
+                  <h4 className="text-lg font-bold">Security & Settings</h4>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-2xl">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-gray-400">
+                          <Smartphone size={20} />
+                        </div>
+                        <div>
+                          <p className="font-bold text-sm">Two-Factor Authentication</p>
+                          <p className="text-xs text-gray-400">Secure your account with OTP</p>
+                        </div>
+                      </div>
+                      <div className="w-12 h-6 bg-green-500 rounded-full relative p-1 cursor-pointer">
+                        <div className="w-4 h-4 bg-white rounded-full absolute right-1" />
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-2xl">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-gray-400">
+                          <Key size={20} />
+                        </div>
+                        <div>
+                          <p className="font-bold text-sm">Change Password</p>
+                          <p className="text-xs text-gray-400">Last changed 3 months ago</p>
+                        </div>
+                      </div>
+                      <ChevronRight size={20} className="text-gray-300" />
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
       {/* Chat Drawer */}
       <AnimatePresence>
         {isChatOpen && (
@@ -1683,15 +2119,21 @@ export default function App() {
               <div className="p-6 border-b border-gray-100 flex items-center justify-between bg-white">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 bg-orange-100 rounded-full overflow-hidden flex items-center justify-center">
-                    {trackingPhase === 'preparing' ? (
-                      <ShoppingBag size={20} className="text-orange-500" />
+                    {currentUser?.role === 'courier' ? (
+                      <div className="w-full h-full bg-blue-100 flex items-center justify-center text-blue-500">
+                        <User size={20} />
+                      </div>
                     ) : (
-                      <img src="https://picsum.photos/seed/courier/100/100" alt="Courier" className="w-full h-full object-cover" />
+                      trackingPhase === 'preparing' ? (
+                        <ShoppingBag size={20} className="text-orange-500" />
+                      ) : (
+                        <img src="https://picsum.photos/seed/courier/100/100" alt="Courier" className="w-full h-full object-cover" />
+                      )
                     )}
                   </div>
                   <div>
                     <h3 className="font-bold">
-                      {trackingPhase === 'preparing' ? "Restaurant Support" : "Alex Johnson (Courier)"}
+                      {currentUser?.role === 'courier' ? "Customer (Mike Ross)" : (trackingPhase === 'preparing' ? "Restaurant Support" : "Alex Johnson (Courier)")}
                     </h3>
                     <div className="text-xs text-green-500 font-medium flex items-center gap-1">
                       <div className="w-1.5 h-1.5 bg-green-500 rounded-full" />
@@ -1703,25 +2145,32 @@ export default function App() {
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50">
-                {messages.map((msg) => (
-                  <div 
-                    key={msg.id} 
-                    className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
+                {messages.map((msg) => {
+                  const isMe = (msg.sender === 'user' && currentUser?.role === 'customer') || (msg.sender === 'courier' && currentUser?.role === 'courier');
+                  return (
                     <div 
-                      className={`max-w-[80%] p-4 rounded-2xl shadow-sm ${
-                        msg.sender === 'user' 
-                        ? 'bg-orange-500 text-white rounded-tr-none' 
-                        : 'bg-white text-gray-800 rounded-tl-none'
-                      }`}
+                      key={msg.id} 
+                      className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}
                     >
-                      <p className="text-sm leading-relaxed">{msg.text}</p>
-                      <p className={`text-[10px] mt-1 ${msg.sender === 'user' ? 'text-orange-100' : 'text-gray-400'}`}>
-                        {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </p>
+                      <div 
+                        className={`max-w-[80%] p-4 rounded-2xl shadow-sm ${
+                          isMe
+                          ? 'bg-orange-500 text-white rounded-tr-none' 
+                          : 'bg-white text-gray-800 rounded-tl-none'
+                        }`}
+                      >
+                        <p className="text-sm leading-relaxed">{msg.text}</p>
+                        <p className={`text-[10px] mt-1 ${
+                          isMe
+                          ? 'text-orange-100' 
+                          : 'text-gray-400'
+                        }`}>
+                          {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="p-4 bg-white border-t border-gray-100">

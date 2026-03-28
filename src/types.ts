@@ -57,6 +57,14 @@ export interface Message {
   timestamp: Date;
 }
 
+export interface PastOrder {
+  id: string;
+  restaurantName: string;
+  items: CartItem[];
+  date: Date;
+  total: number;
+}
+
 export const RESTAURANTS: Restaurant[] = [
   {
     id: '1',
