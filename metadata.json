@@ -1,0 +1,5 @@
+{
+  "name": "QuickBite Delivery",
+  "description": "A modern food delivery application with real-time order tracking and restaurant browsing.",
+  "requestFramePermissions": ["geolocation"]
+}
